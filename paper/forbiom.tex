@@ -1,0 +1,390 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{setspace}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue
+}
+
+\setstretch{1.08}
+
+\title{FORBIOM-ON: An interregional optimization model of Ontario forest products, mass timber, and carbon pricing}
+\author{%
+  Rasoul Yousefpour\thanks{University of Toronto.}
+  \and
+  Yasser Elfahli\thanks{University of Ottawa. Corresponding author.}
+}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This paper documents FORBIOM-ON, a multi-regional, multi-product optimization model of the Ontario forest sector over 2020--2030. The model allocates roundwood harvest, primary processing (lumber and pulpwood), and secondary mass-timber production (cross-laminated timber and glulam) across six forest management units. Prices follow an exogenous path. The objective is private net value minus a charge on process and freight emissions. Forest growth, harvest cost, and demand are shocked by reproducible pseudo-random factors. We state the formulation, the data rules, and four sensitivity experiments: a carbon-price sweep, a mass-timber demand sweep, a lumber-price sweep, and three coupled demand-and-price cases. The reference program is written in GAMS and solved as a nonlinear program because revenue is the product of a fixed price variable and sales. An equivalent linear program in GAMSPy, solved with CPLEX, reproduces the GAMS objective and the published accounting totals to the reported precision. At the calibrated margins, carbon prices from 0 to 500~\$/tCO$_2$ change the objective by the carbon charge itself and leave harvest almost unchanged. Mass-timber demand multipliers scale output and harvest. Lumber price shocks of $\pm 10$ percent move profit without moving mass-timber quantities.
+\end{abstract}
+
+\noindent\textbf{Keywords:} forest sector model; mass timber; carbon pricing; spatial equilibrium; Ontario; GAMSPy.
+
+\section{Introduction}
+
+Forest-sector models are used to trace how timber supply, mill capacity, product demand, and climate policy interact. Ontario's interest in mass timber adds a second processing stage to that problem. Cross-laminated timber (CLT) and glulam do not draw roundwood directly. They draw lumber, so a larger mass-timber market competes with lumber sales and can pull additional harvest only through the primary mill.
+
+FORBIOM-ON is a practical model of that chain for six Ontario forest management units (FMUs): Trout Lake, Abitibi, Algoma, Kenora, Nipissing, and Algonquin. It covers 2020 through 2030 and four products: CLT, glulam, lumber, and pulpwood. The planner maximizes the present-free sum of sales revenue net of harvest, processing, and transport cost, minus a carbon charge. There is no discounting in the current objective. Prices are not endogenous. They grow at a fixed annual rate, which prevents the solver from manufacturing profit by drifting prices.
+
+The paper has three purposes. First, it writes the model in a form that can be checked against the code. Second, it reports the baseline and the sensitivity results that the code writes to the summary tables. Third, it records a solver-independent implementation. The GAMS program is nonlinear only because a fixed price is stored as a variable and multiplied by sales. The GAMSPy program inserts that same price path as data, so the program is linear, and it matches the GAMS solution.
+
+The model is a scenario tool, not a statistical forecast. Several biological and logistics inputs are explicit proxies or placeholders. Section~\ref{sec:limits} states what the solution is and is not entitled to claim.
+
+\section{Regions, products, and horizon}
+
+Let $r \in R$ index the six FMUs and $y \in Y = \{2020,\ldots,2030\}$ index years. Products are
+\[
+P = \{\text{CLT}, \text{glulam}, \text{lumber}, \text{pulpwood}\}.
+\]
+Lumber and pulpwood are primary products. CLT and glulam are secondary products. Manufacturing tier $1$ uses roundwood. Tier $2$ uses lumber.
+
+All quantity variables are in million cubic metres. Prices and unit costs are in dollars per cubic metre. The objective and all value totals are therefore in million dollars. Carbon factors are in tonnes of CO$_2$ per cubic metre of output, so a quantity in million cubic metres produces a carbon total in million tonnes.
+
+Table~\ref{tab:stock} reports the initial roundwood stock. Every FMU starts at age 30. The dominant site class is SC2 in Trout Lake and Abitibi, SC1 in Algoma, Nipissing, and Algonquin, and SC3 in Kenora.
+
+\begin{table}[ht]
+\centering
+\caption{Initial roundwood stock.}
+\label{tab:stock}
+\begin{tabular}{lr}
+\toprule
+FMU & Stock (million m$^3$) \\
+\midrule
+Trout Lake & 28.99948 \\
+Abitibi & 107.77522 \\
+Algoma & 54.88489 \\
+Kenora & 49.74619 \\
+Nipissing & 45.26169 \\
+Algonquin & 36.72526 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Model formulation}
+\label{sec:model}
+
+\subsection{Forest stock and harvest}
+
+Let $s_{r,y}$ be roundwood stock and $h_{r,y}$ harvest. Initial stock is $s^0_r$. Growth $g_{r,y}$ is computed before the optimization. The stock identity is
+\begin{align}
+s_{r,2020} &= s^0_r - h_{r,2020}, \label{eq:stock1} \\
+s_{r,y} &= s_{r,y-1} + g_{r,y} - h_{r,y}, \qquad y > 2020. \label{eq:stockt}
+\end{align}
+From 2025 onward the stock cannot fall below 30 percent of the initial stock,
+\begin{equation}
+s_{r,y} \ge 0.30\, s^0_r, \qquad y \ge 2025.
+\label{eq:floor}
+\end{equation}
+A sustainability ceiling can limit harvest to one percent of the resource available that year,
+\begin{align}
+h_{r,2020} &\le \rho_r s^0_r, \label{eq:cap1} \\
+h_{r,y} &\le \rho_r \bigl(s_{r,y-1} + g_{r,y}\bigr), \qquad y > 2020, \label{eq:capt}
+\end{align}
+with $\rho_r = 0.01$ in every FMU. The ceiling is active in the baseline, in the carbon-price sweep, in the lumber-price sweep, and in the coupled experiments. It is switched off in the mass-timber demand sweep so that a larger demand cap is not silently blocked by the one-percent rule. The stock identity and the floor in \eqref{eq:floor} remain in force in every experiment.
+
+Growth has two parts. A current annual increment is computed from the yield table at ages 30 and 40, weighted by the regional species mix and site class, and converted from cubic metres per hectare to million cubic metres using the area implied by the initial stock. That increment is then scaled by a region-and-year factor
+\begin{equation}
+\gamma_{r,y} = 0.88 + 0.24 \cdot \frac{\bigl(\mathrm{ord}(r)\cdot 31 + \mathrm{ord}(y)\cdot 17 + 7\bigr) \bmod 97}{97},
+\label{eq:gshock}
+\end{equation}
+where $\mathrm{ord}(\cdot)$ is the one-based position of the element in its set. The factor lies in $[0.88, 1.12]$. It is deterministic. It is not a draw from the random-number generator.
+
+\subsection{Processing and material balances}
+
+Let $q_{r,p,y}$ be output and $x_{r,p,y}$ final sales. Primary output uses roundwood with a yield factor $\alpha_p$ (output per unit of roundwood input),
+\begin{equation}
+\frac{q_{r,\mathrm{lumber},y}}{\alpha_{\mathrm{lumber}}}
++ \frac{q_{r,\mathrm{pulpwood},y}}{\alpha_{\mathrm{pulpwood}}}
+\le h_{r,y}.
+\label{eq:rw}
+\end{equation}
+Secondary output does not appear in \eqref{eq:rw}. It appears in the lumber balance. Let $e_{r,r',p,y}$ be the shipment of product $p$ from $r$ to $r' \ne r$, and let $\lambda_p$ be the cubic metres of lumber required per cubic metre of product $p$. Then
+\begin{equation}
+\begin{aligned}
+q_{r,\mathrm{lumber},y}
++ \sum_{r' \ne r} e_{r',r,\mathrm{lumber},y}
+&= x_{r,\mathrm{lumber},y}
++ \sum_{r' \ne r} e_{r,r',\mathrm{lumber},y} \\
+&\quad + \lambda_{\mathrm{CLT}}\, q_{r,\mathrm{CLT},y}
++ \lambda_{\mathrm{glulam}}\, q_{r,\mathrm{glulam},y}.
+\end{aligned}
+\label{eq:lumber}
+\end{equation}
+Pulpwood, CLT, and glulam each have the analogous balance without a further input requirement,
+\begin{equation}
+q_{r,p,y} + \sum_{r' \ne r} e_{r',r,p,y}
+= x_{r,p,y} + \sum_{r' \ne r} e_{r,r',p,y}.
+\label{eq:bal}
+\end{equation}
+There is no product inventory. What is produced in a year is sold, shipped, or, in the case of lumber, used as a mass-timber input in that same year.
+
+Sales cannot exceed a demand cap,
+\begin{equation}
+x_{r,p,y} \le d_{r,p,y}.
+\label{eq:dem}
+\end{equation}
+Output cannot exceed mill capacity, and a shipment cannot exceed arc capacity,
+\begin{align}
+q_{r,p,y} &\le \bar q_{r,p,y}, \label{eq:mill} \\
+e_{r,r',p,y} &\le \bar e_{r,r',p,y}, \qquad r \ne r'. \label{eq:arc}
+\end{align}
+Shipments within an FMU are fixed at zero.
+
+\subsection{Carbon}
+
+Process emissions and carbon stored in products are proportional to output. Freight emissions are proportional to shipments. With factors $\varepsilon_p$, $\sigma_p$, and $\tau_{r,r',p}$,
+\begin{align}
+E &= \sum_{r,p,y} \varepsilon_p q_{r,p,y}
++ \sum_{r \ne r',p,y} \tau_{r,r',p}\, e_{r,r',p,y}, \label{eq:E} \\
+S &= \sum_{r,p,y} \sigma_p q_{r,p,y}. \label{eq:S}
+\end{align}
+Net carbon reported by the model is $E - S$. This is an inventory of process emissions, freight emissions, and carbon in the manufactured products. It is not a forest-carbon budget: standing-stock carbon, harvest residue, and end-of-life releases are outside the accounting.
+
+The carbon charge uses gross emissions, not net carbon,
+\begin{equation}
+C = \pi E,
+\label{eq:C}
+\end{equation}
+where $\pi$ is the carbon price in dollars per tonne of CO$_2$. Because $E$ is in million tonnes, $C$ is in million dollars.
+
+\subsection{Objective}
+
+Let $\pi_{p,y}$ be the exogenous price, $c^H_{r,y}$ the harvest cost, $c^P_{p,y}$ the processing cost, and $c^T_{r,r',p}$ the transport cost. Revenue and the three cost totals are
+\begin{align}
+R &= \sum_{r,p,y} \pi_{p,y}\, x_{r,p,y}, \label{eq:R} \\
+H &= \sum_{r,y} c^H_{r,y}\, h_{r,y}, \\
+P &= \sum_{r,p,y} c^P_{p,y}\, q_{r,p,y}, \\
+T &= \sum_{r \ne r',p,y} c^T_{r,r',p}\, e_{r,r',p,y}.
+\end{align}
+Gross profit is $Z = R - H - P - T$. The program is
+\begin{equation}
+\max \;\; Z - C = R - H - P - T - \pi E,
+\label{eq:obj}
+\end{equation}
+subject to \eqref{eq:stock1}--\eqref{eq:arc} and non-negativity of stocks, harvest, output, sales, and shipments. In the GAMS file the price $\pi_{p,y}$ is a variable fixed to the exogenous path, and revenue is written as a product of two variables, so GAMS classifies the model as nonlinear. With the price fixed, \eqref{eq:obj} is linear. The GAMSPy program uses that linear form.
+
+\section{Data rules}
+\label{sec:data}
+
+\subsection{Yield and area}
+
+Gross merchantable volume follows Plonski's normal yield tables for Ontario \cite{plonski1981}. The coded curves at site class SC1 are white pine, jack pine, and tolerant hardwoods, at ages 30, 40, 50, 60, 70, and 80. The remaining entries are proxies, applied in the following order.
+\begin{itemize}
+\item Site class SC2 is 80 percent of SC1, and SC3 is 60 percent of SC1.
+\item Red pine copies white pine. Spruce copies jack pine. Aspen is 90 percent of jack pine. White birch is 80 percent of jack pine.
+\end{itemize}
+These proxies are a modelling choice. They are not additional Plonski observations.
+
+Regional area is the initial stock divided by the mix-weighted volume per hectare at age 30. The current annual increment is one tenth of the mix-weighted volume gain from age 30 to age 40, converted back to million cubic metres. The same increment applies in every year before multiplication by $\gamma_{r,y}$ in \eqref{eq:gshock}. Species shares are fixed. They sum to one in each FMU. Northern units are dominated by spruce and jack pine. Algoma, Nipissing, and Algonquin carry substantial tolerant hardwood and white pine.
+
+\subsection{Prices, costs, and demand}
+
+Base prices are 700, 575, 375, and 75~\$/m$^3$ for CLT, glulam, lumber, and pulpwood. The price path is
+\begin{equation}
+\pi_{p,y} = \pi_p \cdot (1.03)^{\mathrm{ord}(y)-1}.
+\end{equation}
+Processing cost is a tier base (100~\$/m$^3$ for primary output, 50 for secondary) plus a product markup (150, 120, 20, and $-80$~\$/m$^3$ for CLT, glulam, lumber, and pulpwood), declining by 2 percent per year. The negative pulpwood markup is a coded credit, not an estimated subsidy. Harvest cost is 38~\$/m$^3$ times a uniform shock on $[0.90, 1.10]$, drawn independently for each FMU and year. Transport costs are a fixed origin-destination table, identical for every product. The freight emission factor is 0.018~tCO$_2$ per cubic metre on every positive-length arc.
+
+Table~\ref{tab:tech} lists the technological coefficients.
+
+\begin{table}[ht]
+\centering
+\caption{Product coefficients.}
+\label{tab:tech}
+\begin{tabular}{lrrrrr}
+\toprule
+Product & Tier & Yield $\alpha_p$ & Lumber input $\lambda_p$ & Emission $\varepsilon_p$ & Storage $\sigma_p$ \\
+\midrule
+CLT & 2 & 0.82 & 1.20 & 0.15 & 0.70 \\
+Glulam & 2 & 0.85 & 1.10 & 0.17 & 0.70 \\
+Lumber & 1 & 0.90 & 0 & 0.065 & 0.40 \\
+Pulpwood & 1 & 0.98 & 0 & 0.01 & 0.07 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Demand caps are built from the one-percent harvest proxy $0.01 s^0_r$, then shocked. With a lumber-yield adjustment,
+\begin{align*}
+d^{0}_{r,\mathrm{lumber}} &= 0.20 \cdot (0.01 s^0_r) \cdot \alpha_{\mathrm{lumber}}, \\
+d^{0}_{r,\mathrm{pulpwood}} &= 0.08 \cdot (0.01 s^0_r) \cdot \alpha_{\mathrm{pulpwood}}, \\
+d^{0}_{r,\mathrm{CLT}} &= 0.035 \cdot (0.01 s^0_r) \cdot \alpha_{\mathrm{lumber}} / \lambda_{\mathrm{CLT}}, \\
+d^{0}_{r,\mathrm{glulam}} &= 0.030 \cdot (0.01 s^0_r) \cdot \alpha_{\mathrm{lumber}} / \lambda_{\mathrm{glulam}}.
+\end{align*}
+The cap in year $y$ multiplies the base by a uniform demand shock on $[0.88, 1.12]$. There is no deterministic demand growth. The shares are intentionally smaller than the harvest proxy so that later demand multipliers still have room to bind.
+
+Mill capacities are 10 million m$^3$ per year for lumber and pulpwood and 2.5 for CLT and glulam, in every FMU and year. Arc capacity is 20 million m$^3$ per year on every off-diagonal link. Both are placeholders. In the solved scenarios the largest annual mass-timber flow is far below 2.5, and no rational annual shipment approaches 20, so these bounds do not change the reported optima. They remain in the model so that a later data replacement does not require a new constraint structure.
+
+\subsection{Random numbers}
+
+Harvest-cost shocks and demand shocks use the GAMS uniform generator. The seed is the GAMS default, 3141. Harvest-cost shocks are drawn first, looping over FMUs and then years. Demand shocks are drawn second, looping over FMUs, products, and years. The GAMSPy program calls the same generator in that order. Growth shocks do not consume the generator. They use \eqref{eq:gshock}.
+
+\section{Experiments}
+
+The reference carbon price is $\pi = 170$~\$/tCO$_2$. Four experiments restart the optimization from that reference, changing one block of data at a time except in the coupled cases.
+
+\begin{enumerate}
+\item \textbf{Carbon price.} $\pi \in \{0, 50, 100, 170, 250, 350, 500\}$. Demand caps and prices stay at the reference. The harvest ceiling is on.
+\item \textbf{Mass-timber demand.} CLT and glulam caps are multiplied by $1$, $1.5$, $2$, $3$, $4$, $5$, and $1.1$ (scenarios Baseline, D50, D100, D200, D300, D400, and DU10). Lumber and pulpwood caps are not scaled. The harvest ceiling is off. The carbon price stays at 170.
+\item \textbf{Lumber price.} The lumber price path is multiplied by $1$, $0.95$, $1.05$, $0.90$, and $1.10$. Other prices and all demand caps stay at the reference. The harvest ceiling is on.
+\item \textbf{Coupled cases.} D100 with a 5 percent lumber-price cut, D100 with a 10 percent lumber-price increase, and D200 with a 10 percent lumber-price cut. The harvest ceiling is on.
+\end{enumerate}
+
+Net-carbon differences are measured against cp170 in the carbon sweep and against the baseline demand scenario in the demand sweep.
+
+\section{Implementation}
+
+The reference program is \texttt{code/FORBIOM\_ON.gms}. It builds one nonlinear model, \texttt{ForestCP}, and resolves it inside each scenario loop. Prices are fixed with \texttt{price.fx}. GAMS nevertheless reports a nonlinear program because the revenue identity multiplies that variable by sales. The solver used for the reference tables is CONOPT.
+
+The companion program is \texttt{code/sa13\_gamspy.py}, written for GAMSPy \cite{gamspy}. Revenue uses the price parameter directly, so the model passed to the solver is a linear program. CPLEX solves it. Arc, mill, and demand inequalities are attached as variable bounds rather than as equation rows. A bound $x \le d$ is the same restriction as the inequality \eqref{eq:dem}. The rewrite exists because the demonstration license used in this environment rejects linear models with more than 2,000 rows or 2,000 columns, and the fully row-expanded GAMS generate exceeds that size. No economic constraint is dropped. Indexed emission and storage variables are substituted into the scalar sums \eqref{eq:E} and \eqref{eq:S}, which does not change $E$ or $S$.
+
+Both programs write the same summary: objective, gross emissions, stored carbon, net carbon, the change in net carbon relative to the reference case, and total harvest. The largest absolute discrepancy between the GAMS summary and the GAMSPy summary, across every carbon-price and demand scenario and every published column, is $4.6 \times 10^{-5}$. That is below the fourth decimal place at which the tables are reported. Regional mass-timber quantities and revenues match to the published hundredth of a thousand cubic metres and the published ten-thousandth of a million dollars.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Baseline}
+
+At $\pi = 170$, the objective is 2477.76 million dollars. Gross profit before the carbon charge is 2623.83. Emissions are 0.8593 million tonnes of CO$_2$ and stored carbon is 4.8068, so net carbon on the model's narrow account is $-3.9475$. The carbon charge is about 146.08 million dollars, and $2623.83 - 146.08 = 2477.75$, which closes the objective identity at the reported rounding. Harvest over the eleven years is 12.1763 million m$^3$.
+
+Using the baseline value accounts from the GAMS solution (revenue 4345.14, harvest cost 457.39, processing cost 1263.92), the transport bill required to reconcile gross profit is negligible. The optimum does not pay to move products between FMUs. Prices are the same in every region, and each region's demand is scaled to its own stock, so local production meets local sales.
+
+\subsection{Carbon price}
+
+Table~\ref{tab:cp} shows the carbon-price sweep. From 50 to 500~\$/tCO$_2$, emissions, storage, net carbon, and harvest do not move at the reported precision. The objective falls by approximately $0.8593$ million dollars for each additional dollar per tonne, which is the definition of a charge on a fixed emission quantity. Only the zero-price case differs, and only in the fourth digit of emissions (0.8594 rather than 0.8593). Under these coefficients the carbon price changes the value of a plan that has already been selected. It does not switch the plan.
+
+\begin{table}[ht]
+\centering
+\caption{Carbon-price sweep at reference demand. Totals are sums over FMUs and years.}
+\label{tab:cp}
+\begin{tabular}{lrrrrr}
+\toprule
+Price & Objective & Emissions & Storage & Net carbon & Harvest \\
+(\$/tCO$_2$) & (million \$) & (Mt) & (Mt) & (Mt) & (million m$^3$) \\
+\midrule
+0 & 2623.8389 & 0.8594 & 4.8068 & $-3.9474$ & 12.1763 \\
+50 & 2580.8693 & 0.8593 & 4.8068 & $-3.9475$ & 12.1763 \\
+100 & 2537.9054 & 0.8593 & 4.8068 & $-3.9475$ & 12.1763 \\
+170 & 2477.7558 & 0.8593 & 4.8068 & $-3.9475$ & 12.1763 \\
+250 & 2409.0134 & 0.8593 & 4.8068 & $-3.9475$ & 12.1763 \\
+350 & 2323.0855 & 0.8593 & 4.8068 & $-3.9475$ & 12.1763 \\
+500 & 2194.1935 & 0.8593 & 4.8068 & $-3.9475$ & 12.1763 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Mass-timber demand}
+
+Table~\ref{tab:dem} shows the demand sweep. Mass-timber output, revenue, emissions, storage, and harvest all rise with the cap multiplier. From the baseline to D400 the CLT and glulam caps are five times larger, total mass-timber output rises from 1785.07 to 8925.37 thousand m$^3$, and the objective rises from 2477.76 to 5074.97 million dollars. Harvest rises from 12.18 to 21.31 million m$^3$, less than in proportion to mass timber, because lumber and pulpwood caps are held fixed and because mass timber is only one outlet for roundwood. Net carbon becomes more negative as stored carbon grows faster than process emissions. That sign is an artefact of counting storage in products and not counting the forest stock or end-of-life emissions. It should not be read as a physical climate benefit without those missing flows.
+
+\begin{table}[ht]
+\centering
+\caption{Mass-timber demand sweep at 170~\$/tCO$_2$. Quantity is CLT plus glulam, summed over years and converted to thousand m$^3$.}
+\label{tab:dem}
+\begin{tabular}{lrrrrr}
+\toprule
+Scenario & Multiplier & Objective & Quantity & Revenue & Harvest \\
+ & & (million \$) & (1000 m$^3$) & (million \$) & (million m$^3$) \\
+\midrule
+Baseline & 1.0 & 2477.7558 & 1785.07 & 1329.5227 & 12.1763 \\
+DU10 & 1.1 & 2542.6862 & 1963.58 & 1462.4750 & 12.4047 \\
+D50 & 1.5 & 2802.4077 & 2677.61 & 1994.2841 & 13.3183 \\
+D100 & 2.0 & 3127.0596 & 3570.15 & 2659.0455 & 14.4604 \\
+D200 & 3.0 & 3776.3634 & 5355.22 & 3988.5682 & 16.7444 \\
+D300 & 4.0 & 4425.6672 & 7140.30 & 5318.0909 & 19.0285 \\
+D400 & 5.0 & 5074.9710 & 8925.37 & 6647.6137 & 21.3126 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Regional output stays in proportion to the regional demand caps. In the baseline, Trout Lake, Abitibi, Algoma, Kenora, Nipissing, and Algonquin produce 156.62, 586.73, 303.43, 281.38, 249.27, and 207.64 thousand m$^3$ of mass timber over the horizon. The same shares appear at every multiplier. That pattern is what a non-traded corner solution looks like when every region's cap is scaled by the same factor.
+
+\subsection{Lumber price and coupled shocks}
+
+Table~\ref{tab:price} reports the lumber-price and coupled experiments. Across a $\pm 10$ percent lumber-price band, mass-timber quantity and mass-timber revenue do not change. The objective does. A 10 percent lumber-price increase raises the objective by 277.32 million dollars relative to the reference 2477.76. A 10 percent cut lowers it by 277.32 million dollars in the other direction (2200.44 versus 2477.76). The five-percent shocks are half of that step. Because mass-timber sales stay on their caps, the objective movement is the change in lumber revenue, not a reallocation away from CLT and glulam. At these margins, lumber remains profitable to sell and mass timber remains profitable to produce after the opportunity cost of the lumber input.
+
+The coupled rows show the same separation. D100 alone has objective 3127.06. D100 with a 5 percent lumber-price cut has 2988.40, which is the D100 objective minus the 138.66 million dollars seen in the pure PD5 case ($2477.76 - 2339.10$). D100 with a 10 percent lumber-price increase has 3404.38, equal to the D100 objective plus the pure PI10 gap. D200 with a 10 percent cut matches the same arithmetic. On this solution, demand and lumber price do not interact. Each shock shifts a different block of a corner solution, and the shifts add.
+
+\begin{table}[ht]
+\centering
+\caption{Lumber-price multipliers and coupled demand-price cases. Mass-timber quantity and revenue are defined as in Table~\ref{tab:dem}.}
+\label{tab:price}
+\begin{tabular}{lrrrr}
+\toprule
+Scenario & Lumber multiplier & Objective & Quantity & MT revenue \\
+ & & (million \$) & (1000 m$^3$) & (million \$) \\
+\midrule
+Pbase & 1.00 & 2477.7558 & 1785.07 & 1329.5227 \\
+PD5 & 0.95 & 2339.0977 & 1785.07 & 1329.5227 \\
+PI5 & 1.05 & 2616.4138 & 1785.07 & 1329.5227 \\
+PD10 & 0.90 & 2200.4397 & 1785.07 & 1329.5227 \\
+PI10 & 1.10 & 2755.0719 & 1785.07 & 1329.5227 \\
+\midrule
+D100 with PD5 & 0.95 & 2988.4016 & 3570.15 & 2659.0455 \\
+D100 with PI10 & 1.10 & 3404.3757 & 3570.15 & 2659.0455 \\
+D200 with PD10 & 0.90 & 3499.0473 & 5355.22 & 3988.5682 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion and limitations}
+\label{sec:limits}
+
+Three results are robust inside this specification, and none of them should be carried past it without new data.
+
+First, the carbon price does not reallocate harvest or the product mix between 0 and 500~\$/tCO$_2$. That happens because the charge is small relative to product margins and because emissions are tied to output that is already pinned by demand caps. A carbon policy that taxed a forest stock, a substitution margin, or an endogenous price would not have this invariance. The model can represent a charge on process and freight emissions. It cannot, as written, represent leakage, product substitution by buyers, or a change in mill technology.
+
+Second, mass-timber demand is the shock that moves physical flows. Output tracks the cap because the objective wants to sell every cubic metre the cap allows. If mill capacity, the harvest ceiling, or the stock floor were tight, the tracking would break. In these runs they are not tight. The one-percent ceiling is deliberately removed during the demand sweep. Putting it back would be a different experiment.
+
+Third, moderate lumber-price shocks change value and not quantity. That is informative about the current margins. It is not a general statement that mass timber is insensitive to lumber markets. A larger price shock, an endogenous lumber price, or a binding lumber balance in which mass timber crowds out lumber sales would produce quantity effects. The coupled experiments are additive only because both the demand shock and the price shock leave the same inequalities binding.
+
+The data limitations are equally direct. Site-class and species entries other than the coded white pine, jack pine, and tolerant-hardwood curves are proportional proxies. Area is inferred from stock and yield rather than from a forest inventory. Arc and mill capacities are placeholders, even though they do not bind here. The pulpwood processing credit is a parameter, not an estimated by-product price. Demand shocks and harvest-cost shocks are pseudo-random, reproducible given the seed, and not estimated from a time series. Carbon storage factors convert product volume into tonnes of CO$_2$ by assumption. Net carbon in the tables is therefore an accounting residual of the manufacturing chain.
+
+The comparison of GAMS and GAMSPy validates the algebra and the random-number stream. It does not validate the yield proxies or the demand shares against Ontario mill data.
+
+\section{Conclusion}
+
+FORBIOM-ON links roundwood stock, primary mills, and mass-timber production across six Ontario FMUs under an exogenous price path and a carbon charge on process and freight emissions. On the coded data, the economic optimum meets demand locally. Carbon prices rescale the objective and leave the physical plan essentially unchanged. Mass-timber demand multipliers scale mass-timber output, revenue, and harvest. Lumber prices of ten percent either way rescale lumber revenue and leave the mass-timber schedule on its cap. A linear GAMSPy implementation reproduces the nonlinear GAMS solution at the precision of the published tables.
+
+The next empirical step is to replace the proxy yields, the placeholder capacities, and the constructed demand caps with inventory and mill data, and to extend the carbon account beyond the manufacturing chain. Until that replacement, the tables in this paper are the solution of the stated program, not a prediction of Ontario harvest.
+
+\section*{Replication}
+
+The GAMS source is \texttt{code/FORBIOM\_ON.gms}. The GAMSPy source is \texttt{code/sa13\_gamspy.py}. From the repository root, with Python~3.11, GAMSPy, and a GAMS license that can solve the linear program,
+\begin{quote}
+\texttt{python code/sa13\_gamspy.py}
+\end{quote}
+writes the summary and the regional reports to \texttt{results/}. The run reported here used GAMSPy~1.29.1, the GAMS uniform seed 3141, and CPLEX. The reference GAMS tables were produced with GAMS~48.3 and CONOPT. Agreement of the two summaries is checked at the end of the Python script when \texttt{results/gams\_summary\_public\_table.csv} is present.
+
+\begin{thebibliography}{9}
+
+\bibitem{plonski1981}
+Plonski, W.~L. (1981).
+\textit{Normal yield tables (metric) for major forest species of Ontario}.
+Ontario Ministry of Natural Resources, Forest Research Group, Toronto.
+
+\bibitem{gams}
+GAMS Development Corporation.
+\textit{GAMS Documentation}.
+\url{https://www.gams.com/latest/docs/}
+
+\bibitem{gamspy}
+GAMSPy documentation.
+\url{https://gamspy.readthedocs.io/}
+
+\end{thebibliography}
+
+\end{document}
